@@ -28,7 +28,7 @@ const MAX_CHAT_HISTORY = 100;
 
 // Helper functions
 function generateRandomName() {
-  const adjectives = ['Mutlu', 'Hızlı', 'Güzel', 'Akıllı', 'Cüretkar', 'Neşeli', 'Sessiz', 'Gür��ltülü'];
+  const adjectives = ['Mutlu', 'Hızlı', 'Güzel', 'Akıllı', 'Cüretkar', 'Neşeli', 'Sessiz', 'Gürültülü'];
   const nouns = ['Panda', 'Aslan', 'Kuş', 'Balık', 'Ejderha', 'Kaplan', 'Köpek', 'Kedi'];
   const adjective = adjectives[Math.floor(Math.random() * adjectives.length)];
   const noun = nouns[Math.floor(Math.random() * nouns.length)];
@@ -173,6 +173,11 @@ function getStats() {
     spammersTracked: spammerTracking.size
   };
 }
+
+// Admin page route - FIX FOR /admin
+app.get('/admin', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'admin.html'));
+});
 
 // Admin API routes
 app.post('/api/admin/login', (req, res) => {
