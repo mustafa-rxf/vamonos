@@ -23,8 +23,15 @@ app.use(express.json());
 const users = new Map();
 const bannedDevices = new Map();
 const spammerTracking = new Map();
+const messageHistory = new Map(); // Device ID -> Array of message timestamps
+const throttledDevices = new Map(); // Device ID -> throttle end time
 const chatHistory = [];
 const MAX_CHAT_HISTORY = 100;
+
+// Spam prevention settings
+const SPAM_WINDOW = 10 * 60 * 1000; // 10 minutes in milliseconds
+const MAX_MESSAGES_PER_WINDOW = 30; // Max messages in 10 minutes
+const THROTTLE_DURATION = 10 * 60 * 1000; // 10 minutes throttle time
 
 // Helper functions
 function generateRandomName() {
@@ -44,6 +51,51 @@ function hasLink(message) {
     /ftp:\/\//i
   ];
   return linkPatterns.some(pattern => pattern.test(message));
+}
+
+// Check if device is throttled (spam prevention)
+function isDeviceThrottled(deviceId) {
+  if (!throttledDevices.has(deviceId)) {
+    return false;
+  }
+  
+  const throttleEndTime = throttledDevices.get(deviceId);
+  const now = Date.now();
+  
+  if (now > throttleEndTime) {
+    // Throttle period has ended
+    throttledDevices.delete(deviceId);
+    messageHistory.delete(deviceId);
+    return false;
+  }
+  
+  return true;
+}
+
+// Check message frequency (spam detection)
+function checkSpamFrequency(deviceId) {
+  const now = Date.now();
+  
+  // Initialize message history for this device if not exists
+  if (!messageHistory.has(deviceId)) {
+    messageHistory.set(deviceId, []);
+  }
+  
+  const messages = messageHistory.get(deviceId);
+  
+  // Remove messages older than SPAM_WINDOW
+  while (messages.length > 0 && now - messages[0] > SPAM_WINDOW) {
+    messages.shift();
+  }
+  
+  // Check if device exceeded limit
+  if (messages.length >= MAX_MESSAGES_PER_WINDOW) {
+    return false; // Spam detected
+  }
+  
+  // Add current message timestamp
+  messages.push(now);
+  return true; // Message is allowed
 }
 
 // Socket.io connection
@@ -88,6 +140,38 @@ io.on('connection', (socket) => {
     if (!userDeviceId || !userName) return;
     
     const message = data.message.trim();
+    
+    // Check if device is throttled (spam prevention)
+    if (isDeviceThrottled(userDeviceId)) {
+      socket.emit('throttled', { 
+        message: 'Çok hızlı mesaj gönderiyorsunuz. Lütfen 10 dakika bekleyiniz.' 
+      });
+      return;
+    }
+    
+    // Check spam frequency
+    if (!checkSpamFrequency(userDeviceId)) {
+      // Activate throttle
+      throttledDevices.set(userDeviceId, Date.now() + THROTTLE_DURATION);
+      
+      const throttleMessage = {
+        type: 'system',
+        message: `⏱️ ${userName} spam nedeniyle 10 dakika susturuldu!`,
+        timestamp: new Date().toISOString(),
+        usersOnline: users.size
+      };
+      
+      chatHistory.push(throttleMessage);
+      if (chatHistory.length > MAX_CHAT_HISTORY) {
+        chatHistory.shift();
+      }
+      
+      io.emit('throttle_warning', throttleMessage);
+      socket.emit('throttled', { 
+        message: 'Çok hızlı mesaj gönderiyorsunuz. Cihazınız 10 dakika susturuldu.' 
+      });
+      return;
+    }
     
     if (hasLink(message)) {
       // Track spammer
@@ -170,11 +254,12 @@ function getStats() {
   return {
     usersOnline: users.size,
     bannedDevices: bannedDevices.size,
-    spammersTracked: spammerTracking.size
+    spammersTracked: spammerTracking.size,
+    throttledDevices: throttledDevices.size
   };
 }
 
-// Admin page route - FIX FOR /admin
+// Admin page route
 app.get('/admin', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'admin.html'));
 });
@@ -194,6 +279,7 @@ app.get('/api/admin/stats', (req, res) => {
     usersOnline: users.size,
     bannedDevices: bannedDevices.size,
     spammersTracked: spammerTracking.size,
+    throttledDevices: throttledDevices.size,
     totalMessages: chatHistory.length
   });
 });
@@ -216,12 +302,34 @@ app.get('/api/admin/banned-devices', (req, res) => {
   res.json(banned);
 });
 
+app.get('/api/admin/throttled-devices', (req, res) => {
+  const throttled = Array.from(throttledDevices.entries()).map(([deviceId, endTime]) => ({
+    deviceId,
+    throttledAt: new Date(Date.now() - (THROTTLE_DURATION - (endTime - Date.now()))).toISOString(),
+    endsAt: new Date(endTime).toISOString(),
+    remainingTime: Math.max(0, endTime - Date.now())
+  }));
+  res.json(throttled);
+});
+
 app.post('/api/admin/unban-device', (req, res) => {
   const { deviceId } = req.body;
   if (bannedDevices.has(deviceId)) {
     bannedDevices.delete(deviceId);
     io.emit('stats', getStats());
     res.json({ success: true, message: 'Cihaz banı kaldırıldı' });
+  } else {
+    res.status(404).json({ success: false, message: 'Cihaz bulunamadı' });
+  }
+});
+
+app.post('/api/admin/unthrottle-device', (req, res) => {
+  const { deviceId } = req.body;
+  if (throttledDevices.has(deviceId)) {
+    throttledDevices.delete(deviceId);
+    messageHistory.delete(deviceId);
+    io.emit('stats', getStats());
+    res.json({ success: true, message: 'Cihaz susturması kaldırıldı' });
   } else {
     res.status(404).json({ success: false, message: 'Cihaz bulunamadı' });
   }
