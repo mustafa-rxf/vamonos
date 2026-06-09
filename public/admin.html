@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Vamonos Admin Panel</title>
+  <link rel="stylesheet" href="admin-styles.css">
+</head>
+<body>
+  <div class="admin-container">
+    <div class="admin-header">
+      <h1>🔐 Admin Paneli</h1>
+      <button class="logout-btn" onclick="logout()">Çıkış Yap</button>
+    </div>
+
+    <div class="stats-row">
+      <div class="stat-card users">
+        <h3>👥 Aktif Kullanıcılar</h3>
+        <div class="number" id="users-count">0</div>
+      </div>
+      <div class="stat-card banned">
+        <h3>🚫 Banlanmış Cihazlar</h3>
+        <div class="number" id="banned-count">0</div>
+      </div>
+      <div class="stat-card spammers">
+        <h3>⚠️ Spammer Takibi</h3>
+        <div class="number" id="spammers-count">0</div>
+      </div>
+      <div class="stat-card messages">
+        <h3>💬 Toplam Mesaj</h3>
+        <div class="number" id="messages-count">0</div>
+      </div>
+    </div>
+
+    <div class="tabs">
+      <button class="tab-btn active" data-tab="users">👥 Kullanıcılar</button>
+      <button class="tab-btn" data-tab="banned">🚫 Banlanmış Cihazlar</button>
+      <button class="tab-btn" data-tab="spammers">⚠️ Spammer Takibi</button>
+      <button class="tab-btn" data-tab="history">💬 Chat Geçmişi</button>
+    </div>
+
+    <div id="tab-users" class="tab-content active">
+      <h2>Aktif Kullanıcılar</h2>
+      <div id="users-list"></div>
+    </div>
+
+    <div id="tab-banned" class="tab-content">
+      <h2>Banlanmış Cihazlar</h2>
+      <div id="banned-list"></div>
+      <div class="clear-bans-section">
+        <button class="clear-bans-btn" onclick="clearAllBans()">Tüm Banları Temizle</button>
+      </div>
+    </div>
+
+    <div id="tab-spammers" class="tab-content">
+      <h2>Spammer Takibi</h2>
+      <p style="font-size: 12px; color: #666; margin-bottom: 15px;">Spam yapan kişilerin tüm Device ID'leri ve aktiviteleri:</p>
+      <div id="spammers-list"></div>
+    </div>
+
+    <div id="tab-history" class="tab-content">
+      <h2>Chat Geçmişi (Son 100 Mesaj)</h2>
+      <div id="chat-history"></div>
+    </div>
+  </div>
+
+  <script src="admin.js"></script>
+</body>
+</html>

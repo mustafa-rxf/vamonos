@@ -1,93 +1,113 @@
 const socket = io();
-const messagesDiv = document.getElementById('messages');
-const messageInput = document.getElementById('messageInput');
-const sendBtn = document.getElementById('sendBtn');
-const usernameSpan = document.getElementById('username');
+let deviceId = localStorage.getItem('deviceId');
 
-let currentUsername = '';
-
-// Clear previous messages on each new connection
-messagesDiv.innerHTML = '<div class="system-message">Welcome to Vamonos! You are anonymous. Links will result in IP ban.</div>';
-
-// Receive user info
-socket.on('userInfo', (data) => {
-  currentUsername = data.username;
-  usernameSpan.textContent = data.username;
-});
-
-// Receive messages
-socket.on('message', (data) => {
-  const messageEl = document.createElement('div');
-  messageEl.className = `message ${data.username === currentUsername ? 'sent' : 'received'}`;
-  
-  const contentEl = document.createElement('div');
-  contentEl.className = 'message-content';
-  contentEl.textContent = data.message;
-  
-  const infoEl = document.createElement('div');
-  infoEl.className = 'message-info';
-  infoEl.textContent = `${data.username} • ${data.timestamp}`;
-  
-  messageEl.appendChild(contentEl);
-  messageEl.appendChild(infoEl);
-  
-  messagesDiv.appendChild(messageEl);
-  messagesDiv.scrollTop = messagesDiv.scrollHeight;
-});
-
-// User joined
-socket.on('userJoined', (data) => {
-  const systemEl = document.createElement('div');
-  systemEl.className = 'system-message';
-  systemEl.textContent = data.message;
-  messagesDiv.appendChild(systemEl);
-  messagesDiv.scrollTop = messagesDiv.scrollHeight;
-});
-
-// User left
-socket.on('userLeft', (data) => {
-  const systemEl = document.createElement('div');
-  systemEl.className = 'system-message';
-  systemEl.textContent = data.message;
-  messagesDiv.appendChild(systemEl);
-  messagesDiv.scrollTop = messagesDiv.scrollHeight;
-});
-
-// Link detected - user banned
-socket.on('linkDetected', (data) => {
-  const systemEl = document.createElement('div');
-  systemEl.className = 'system-message warning';
-  systemEl.textContent = '🚫 ' + data.message;
-  messagesDiv.appendChild(systemEl);
-  messagesDiv.scrollTop = messagesDiv.scrollHeight;
-});
-
-// User banned
-socket.on('banned', (data) => {
-  const systemEl = document.createElement('div');
-  systemEl.className = 'system-message warning';
-  systemEl.textContent = '⛔ ' + data.message;
-  messagesDiv.appendChild(systemEl);
-  messageInput.disabled = true;
-  sendBtn.disabled = true;
-  setTimeout(() => {
-    messagesDiv.scrollTop = messagesDiv.scrollHeight;
-  }, 100);
-});
-
-// Send message
-function sendMessage() {
-  const message = messageInput.value.trim();
-  if (message === '') return;
-  
-  socket.emit('message', message);
-  messageInput.value = '';
-  messageInput.focus();
+if (!deviceId) {
+  deviceId = 'device_' + Math.random().toString(36).substr(2, 9);
+  localStorage.setItem('deviceId', deviceId);
 }
 
-sendBtn.addEventListener('click', sendMessage);
+const chatContainer = document.getElementById('chat-container');
+const messageInput = document.getElementById('message-input');
+const sendBtn = document.getElementById('send-btn');
+const usersOnlineEl = document.getElementById('users-online');
+
+socket.on('connect', () => {
+  socket.emit('join', { deviceId });
+});
+
+socket.on('banned', (data) => {
+  alert(data.message);
+  location.reload();
+});
+
+socket.on('message', (data) => {
+  addMessageToChat(data);
+});
+
+socket.on('user_joined', (data) => {
+  addSystemMessage(data.message);
+  updateUsersOnline(data.usersOnline);
+});
+
+socket.on('user_left', (data) => {
+  addSystemMessage(data.message);
+  updateUsersOnline(data.usersOnline);
+});
+
+socket.on('user_banned', (data) => {
+  addBanMessage(data.message);
+  updateUsersOnline(data.usersOnline);
+});
+
+socket.on('stats', (stats) => {
+  updateStats(stats);
+});
+
+function addMessageToChat(data) {
+  const messageEl = document.createElement('div');
+  messageEl.className = 'message user-message';
+  messageEl.innerHTML = `
+    <strong>${data.name}</strong>: ${escapeHtml(data.message)}
+    <span class="message-time">${new Date(data.timestamp).toLocaleTimeString('tr-TR')}</span>
+  `;
+  chatContainer.appendChild(messageEl);
+  chatContainer.scrollTop = chatContainer.scrollHeight;
+}
+
+function addSystemMessage(message) {
+  const messageEl = document.createElement('div');
+  messageEl.className = 'message system-message';
+  messageEl.textContent = message;
+  chatContainer.appendChild(messageEl);
+  chatContainer.scrollTop = chatContainer.scrollHeight;
+}
+
+function addBanMessage(message) {
+  const messageEl = document.createElement('div');
+  messageEl.className = 'message ban-message';
+  messageEl.textContent = message;
+  chatContainer.appendChild(messageEl);
+  chatContainer.scrollTop = chatContainer.scrollHeight;
+}
+
+function updateUsersOnline(count) {
+  usersOnlineEl.textContent = count;
+}
+
+function updateStats(stats) {
+  // Stats can be displayed if needed
+}
+
+function escapeHtml(text) {
+  const map = {
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#039;'
+  };
+  return text.replace(/[&<>"']/g, m => map[m]);
+}
+
+sendBtn.addEventListener('click', () => {
+  const message = messageInput.value.trim();
+  if (message) {
+    socket.emit('message', { message });
+    messageInput.value = '';
+  }
+});
+
 messageInput.addEventListener('keypress', (e) => {
   if (e.key === 'Enter') {
-    sendMessage();
+    sendBtn.click();
   }
+});
+
+// Mobile keyboard handling
+messageInput.addEventListener('focus', () => {
+  document.body.classList.add('keyboard-open');
+});
+
+messageInput.addEventListener('blur', () => {
+  document.body.classList.remove('keyboard-open');
 });
