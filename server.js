@@ -2,359 +2,261 @@ const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
 const path = require('path');
+require('dotenv').config();
 
 const app = express();
 const server = http.createServer(app);
-const io = socketIo(server, {
-  cors: {
-    origin: "*",
-    methods: ["GET", "POST"]
-  }
-});
+const io = socketIo(server);
 
-const PORT = process.env.PORT || 3000;
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
-
-// Serve static files
-app.use(express.static(path.join(__dirname, 'public')));
+// Middleware
 app.use(express.json());
+app.use(express.static('public'));
 
-// Data storage
-const users = new Map();
-const bannedDevices = new Map();
-const spammerTracking = new Map();
-const messageHistory = new Map(); // Device ID -> Array of message timestamps
-const throttledDevices = new Map(); // Device ID -> throttle end time
-const chatHistory = [];
-const MAX_CHAT_HISTORY = 100;
+// ========== VERİ YAPILARI ==========
+const bannedDevices = new Map();     // deviceId -> ban detayları
+const bannedList = new Set();        // sadece deviceId'ler
+const spamTracker = new Map();       // deviceId -> spam istatistikleri
+const activeUsers = new Map();       // socketId -> user info
 
-// Spam prevention settings
-const SPAM_WINDOW = 10 * 60 * 1000; // 10 minutes in milliseconds
-const MAX_MESSAGES_PER_WINDOW = 30; // Max messages in 10 minutes
-const THROTTLE_DURATION = 10 * 60 * 1000; // 10 minutes throttle time
+// ========== SPAM AYARLARI ==========
+const SPAM_LIMITS = {
+    MESSAGE_LIMIT: 5,        // 5 mesaj
+    TIME_WINDOW: 10,          // 10 saniye
+    AUTO_BAN_AFTER: 3         // 3 uyarı sonra ban
+};
 
-// Helper functions
-function generateRandomName() {
-  const adjectives = ['Mutlu', 'Hızlı', 'Güzel', 'Akıllı', 'Cüretkar', 'Neşeli', 'Sessiz', 'Gürültülü'];
-  const nouns = ['Panda', 'Aslan', 'Kuş', 'Balık', 'Ejderha', 'Kaplan', 'Köpek', 'Kedi'];
-  const adjective = adjectives[Math.floor(Math.random() * adjectives.length)];
-  const noun = nouns[Math.floor(Math.random() * nouns.length)];
-  const number = Math.floor(Math.random() * 1000);
-  return `${adjective}${noun}${number}`;
-}
-
-function hasLink(message) {
-  const linkPatterns = [
-    /http:\/\//i,
-    /https:\/\//i,
-    /www\./i,
-    /ftp:\/\//i
-  ];
-  return linkPatterns.some(pattern => pattern.test(message));
-}
-
-// Check if device is throttled (spam prevention)
-function isDeviceThrottled(deviceId) {
-  if (!throttledDevices.has(deviceId)) {
-    return false;
-  }
-  
-  const throttleEndTime = throttledDevices.get(deviceId);
-  const now = Date.now();
-  
-  if (now > throttleEndTime) {
-    // Throttle period has ended
-    throttledDevices.delete(deviceId);
-    messageHistory.delete(deviceId);
-    return false;
-  }
-  
-  return true;
-}
-
-// Check message frequency (spam detection)
-function checkSpamFrequency(deviceId) {
-  const now = Date.now();
-  
-  // Initialize message history for this device if not exists
-  if (!messageHistory.has(deviceId)) {
-    messageHistory.set(deviceId, []);
-  }
-  
-  const messages = messageHistory.get(deviceId);
-  
-  // Remove messages older than SPAM_WINDOW
-  while (messages.length > 0 && now - messages[0] > SPAM_WINDOW) {
-    messages.shift();
-  }
-  
-  // Check if device exceeded limit
-  if (messages.length >= MAX_MESSAGES_PER_WINDOW) {
-    return false; // Spam detected
-  }
-  
-  // Add current message timestamp
-  messages.push(now);
-  return true; // Message is allowed
-}
-
-// Socket.io connection
-io.on('connection', (socket) => {
-  let userDeviceId = null;
-  let userName = null;
-
-  socket.on('join', (data) => {
-    userDeviceId = data.deviceId;
+// ========== SPAM KONTROL FONKSİYONU ==========
+function checkSpam(deviceId, username) {
+    const now = Date.now() / 1000;
     
-    // Check if device is banned
-    if (bannedDevices.has(userDeviceId)) {
-      socket.emit('banned', { message: 'Bu cihaz banlandı!' });
-      socket.disconnect();
-      return;
+    if (!spamTracker.has(deviceId)) {
+        spamTracker.set(deviceId, {
+            messages: [],
+            warnings: 0,
+            lastWarnTime: 0
+        });
     }
     
-    userName = generateRandomName();
-    users.set(socket.id, {
-      name: userName,
-      deviceId: userDeviceId,
-      joinedAt: new Date()
+    const userSpam = spamTracker.get(deviceId);
+    
+    // 10 saniyeden eski mesajları temizle
+    userSpam.messages = userSpam.messages.filter(time => (now - time) < SPAM_LIMITS.TIME_WINDOW);
+    
+    // Yeni mesaj zamanını ekle
+    userSpam.messages.push(now);
+    
+    // Spam kontrolü
+    if (userSpam.messages.length > SPAM_LIMITS.MESSAGE_LIMIT) {
+        userSpam.warnings++;
+        
+        if (userSpam.warnings >= SPAM_LIMITS.AUTO_BAN_AFTER) {
+            // OTOMATİK BAN
+            bannedDevices.set(deviceId, { 
+                reason: 'Aşırı spam (otomatik ban)',
+                timestamp: now,
+                warnings: userSpam.warnings
+            });
+            bannedList.add(deviceId);
+            
+            // Tüm bağlantıları kes
+            for (let [socketId, socket] of io.sockets.sockets) {
+                if (socket.handshake.auth.deviceId === deviceId) {
+                    socket.emit('banned', { message: 'Spam nedeniyle otomatik banlandınız!' });
+                    socket.disconnect();
+                }
+            }
+            
+            // Admin'e bildir
+            io.emit('system_message', { 
+                text: `⚠️ Sistem: ${username || deviceId} spam nedeniyle otomatik banlandı!`, 
+                type: 'alert' 
+            });
+            
+            return { isSpam: true, autoBanned: true };
+        } else {
+            // UYARI GÖNDER
+            const remainingWarnings = SPAM_LIMITS.AUTO_BAN_AFTER - userSpam.warnings;
+            
+            // Uyarıyı sadece bu cihaza gönder
+            for (let [socketId, socket] of io.sockets.sockets) {
+                if (socket.handshake.auth.deviceId === deviceId) {
+                    socket.emit('spam_warning', { 
+                        warning: userSpam.warnings,
+                        message: `⚠️ Spam yapmayın! ${remainingWarnings} uyarı sonra banlanacaksınız.`
+                    });
+                }
+            }
+            
+            return { isSpam: true, autoBanned: false, warnings: userSpam.warnings };
+        }
+    }
+    
+    return { isSpam: false };
+}
+
+// ========== BAN MIDDLEWARE (SOCKET.IO) ==========
+io.use((socket, next) => {
+    const deviceId = socket.handshake.auth.deviceId;
+    
+    if (bannedDevices.has(deviceId) || bannedList.has(deviceId)) {
+        const error = new Error("Bu cihaz banlanmış!");
+        error.data = { reason: "banned" };
+        return next(error);
+    }
+    next();
+});
+
+// ========== SOCKET.IO CONNECTION ==========
+io.on('connection', (socket) => {
+    const deviceId = socket.handshake.auth.deviceId;
+    const username = socket.handshake.auth.username || 'İsimsiz';
+    
+    // Çift ban kontrolü
+    if (bannedDevices.has(deviceId) || bannedList.has(deviceId)) {
+        socket.emit('banned', { message: 'Bu cihaz banlı!' });
+        socket.disconnect();
+        return;
+    }
+    
+    // Kullanıcıyı aktif listeye ekle
+    activeUsers.set(socket.id, {
+        username: username,
+        deviceId: deviceId,
+        joinedAt: Date.now()
     });
     
-    const joinMessage = {
-      type: 'system',
-      message: `${userName} sohbete katıldı`,
-      timestamp: new Date().toISOString(),
-      usersOnline: users.size
-    };
+    console.log(`✅ Kullanıcı bağlandı: ${username} (${deviceId})`);
     
-    chatHistory.push(joinMessage);
-    if (chatHistory.length > MAX_CHAT_HISTORY) {
-      chatHistory.shift();
-    }
+    // Bağlantı bilgisini client'a gönder
+    socket.emit('connected', { deviceId: deviceId });
     
-    io.emit('user_joined', joinMessage);
-    io.emit('stats', getStats());
-  });
-
-  socket.on('message', (data) => {
-    if (!userDeviceId || !userName) return;
+    // Kullanıcı listesini güncelle
+    io.emit('user_list', Array.from(activeUsers.values()));
     
-    const message = data.message.trim();
+    // ===== MESAJ GÖNDERME EVENT'İ (SPAM KONTROLLÜ) =====
+    socket.on('chat_message', (data) => {
+        const deviceId = socket.handshake.auth.deviceId;
+        const username = socket.handshake.auth.username;
+        
+        // Spam kontrolü
+        const spamCheck = checkSpam(deviceId, username);
+        if (spamCheck.isSpam) {
+            return; // Spam ise mesaj gönderme
+        }
+        
+        // Link engelleme
+        const linkPattern = /(https?:\/\/|www\.|ftp:\/\/)/i;
+        if (linkPattern.test(data.message)) {
+            // Link paylaşımı = anında ban
+            bannedDevices.set(deviceId, { reason: 'Link paylaşımı', timestamp: Date.now() });
+            bannedList.add(deviceId);
+            socket.emit('banned', { message: 'Link paylaştığınız için banlandınız!' });
+            socket.disconnect();
+            io.emit('system_message', { text: `⚠️ ${username} link paylaştığı için banlandı!`, type: 'alert' });
+            return;
+        }
+        
+        // Normal mesajı herkese gönder
+        io.emit('chat_message', {
+            username: username,
+            message: data.message,
+            timestamp: new Date().toISOString(),
+            deviceId: deviceId
+        });
+    });
     
-    // Check if device is throttled (spam prevention)
-    if (isDeviceThrottled(userDeviceId)) {
-      socket.emit('throttled', { 
-        message: 'Çok hızlı mesaj gönderiyorsunuz. Lütfen 10 dakika bekleyiniz.' 
-      });
-      return;
-    }
-    
-    // Check spam frequency
-    if (!checkSpamFrequency(userDeviceId)) {
-      // Activate throttle
-      throttledDevices.set(userDeviceId, Date.now() + THROTTLE_DURATION);
-      
-      const throttleMessage = {
-        type: 'system',
-        message: `⏱️ ${userName} spam nedeniyle 10 dakika susturuldu!`,
-        timestamp: new Date().toISOString(),
-        usersOnline: users.size
-      };
-      
-      chatHistory.push(throttleMessage);
-      if (chatHistory.length > MAX_CHAT_HISTORY) {
-        chatHistory.shift();
-      }
-      
-      io.emit('throttle_warning', throttleMessage);
-      socket.emit('throttled', { 
-        message: 'Çok hızlı mesaj gönderiyorsunuz. Cihazınız 10 dakika susturuldu.' 
-      });
-      return;
-    }
-    
-    if (hasLink(message)) {
-      // Track spammer
-      if (!spammerTracking.has(userDeviceId)) {
-        spammerTracking.set(userDeviceId, []);
-      }
-      spammerTracking.get(userDeviceId).push({
-        timestamp: new Date().toISOString(),
-        message: message.substring(0, 50)
-      });
-      
-      // Ban the device
-      bannedDevices.set(userDeviceId, {
-        reason: 'Link paylaşımı',
-        bannedAt: new Date().toISOString(),
-        reason_details: 'İllegal link paylaşımı tespit edildi'
-      });
-      
-      const spamMessage = {
-        type: 'spam',
-        message: `⚠️ ${userName} (Device: ${userDeviceId}) link paylaştığı için banlandı!`,
-        timestamp: new Date().toISOString(),
-        usersOnline: users.size
-      };
-      
-      chatHistory.push(spamMessage);
-      if (chatHistory.length > MAX_CHAT_HISTORY) {
-        chatHistory.shift();
-      }
-      
-      io.emit('user_banned', spamMessage);
-      socket.emit('banned', { message: 'Link paylaşımı yasaktır! Cihazınız banlandı.' });
-      socket.disconnect();
-      io.emit('stats', getStats());
-      return;
-    }
-    
-    const chatMessage = {
-      type: 'chat',
-      name: userName,
-      deviceId: userDeviceId,
-      message: message,
-      timestamp: new Date().toISOString(),
-      usersOnline: users.size
-    };
-    
-    chatHistory.push(chatMessage);
-    if (chatHistory.length > MAX_CHAT_HISTORY) {
-      chatHistory.shift();
-    }
-    
-    io.emit('message', chatMessage);
-  });
-
-  socket.on('disconnect', () => {
-    if (users.has(socket.id)) {
-      const user = users.get(socket.id);
-      users.delete(socket.id);
-      
-      const leaveMessage = {
-        type: 'system',
-        message: `${user.name} sohbeti terk etti`,
-        timestamp: new Date().toISOString(),
-        usersOnline: users.size
-      };
-      
-      chatHistory.push(leaveMessage);
-      if (chatHistory.length > MAX_CHAT_HISTORY) {
-        chatHistory.shift();
-      }
-      
-      io.emit('user_left', leaveMessage);
-      io.emit('stats', getStats());
-    }
-  });
+    // ===== DEVREDEN ÇIKMA =====
+    socket.on('disconnect', () => {
+        activeUsers.delete(socket.id);
+        io.emit('user_list', Array.from(activeUsers.values()));
+        console.log(`❌ Kullanıcı ayrıldı: ${username} (${deviceId})`);
+    });
 });
 
-// Helper function for stats
-function getStats() {
-  return {
-    usersOnline: users.size,
-    bannedDevices: bannedDevices.size,
-    spammersTracked: spammerTracking.size,
-    throttledDevices: throttledDevices.size
-  };
+// ========== ADMIN AUTH ==========
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
+
+function authenticateAdmin(req, res, next) {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return res.status(401).json({ error: 'Yetkisiz' });
+    }
+    const token = authHeader.split(' ')[1];
+    if (token !== ADMIN_PASSWORD) {
+        return res.status(401).json({ error: 'Geçersiz şifre' });
+    }
+    next();
 }
 
-// Admin page route
-app.get('/admin', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'admin.html'));
+// ========== API ROUTES ==========
+
+// Aktif kullanıcıları listele (device ID ile)
+app.get('/api/users', authenticateAdmin, (req, res) => {
+    const users = Array.from(activeUsers.values());
+    res.json(users);
 });
 
-// Admin API routes
-app.post('/api/admin/login', (req, res) => {
-  const { password } = req.body;
-  if (password === ADMIN_PASSWORD) {
-    res.json({ success: true });
-  } else {
-    res.status(401).json({ success: false, message: 'Yanlış şifre' });
-  }
+// Banlı kullanıcıları listele
+app.get('/api/banned', authenticateAdmin, (req, res) => {
+    const banned = Array.from(bannedDevices.entries()).map(([deviceId, data]) => ({
+        deviceId: deviceId,
+        reason: data.reason,
+        timestamp: data.timestamp
+    }));
+    res.json(banned);
 });
 
-app.get('/api/admin/stats', (req, res) => {
-  res.json({
-    usersOnline: users.size,
-    bannedDevices: bannedDevices.size,
-    spammersTracked: spammerTracking.size,
-    throttledDevices: throttledDevices.size,
-    totalMessages: chatHistory.length
-  });
+// Kullanıcı banlama (admin panelinden)
+app.post('/api/admin/ban', authenticateAdmin, (req, res) => {
+    const { deviceId, reason } = req.body;
+    
+    if (!deviceId) {
+        return res.status(400).json({ error: 'Device ID gerekli' });
+    }
+    
+    // Banla
+    bannedDevices.set(deviceId, { 
+        reason: reason || 'Admin tarafından banlandı', 
+        timestamp: Date.now(),
+        bannedBy: 'admin'
+    });
+    bannedList.add(deviceId);
+    
+    // Kullanıcının bağlantısını kes
+    for (let [socketId, socket] of io.sockets.sockets) {
+        if (socket.handshake.auth.deviceId === deviceId) {
+            socket.emit('banned', { message: `Admin tarafından banlandınız: ${reason || 'Kural ihlali'}` });
+            socket.disconnect();
+        }
+    }
+    
+    res.json({ success: true, message: 'Cihaz banlandı' });
 });
 
-app.get('/api/admin/users', (req, res) => {
-  const userList = Array.from(users.values()).map(user => ({
-    name: user.name,
-    deviceId: user.deviceId,
-    joinedAt: user.joinedAt
-  }));
-  res.json(userList);
-});
-
-app.get('/api/admin/banned-devices', (req, res) => {
-  const banned = Array.from(bannedDevices.entries()).map(([deviceId, data]) => ({
-    deviceId,
-    reason: data.reason,
-    bannedAt: data.bannedAt
-  }));
-  res.json(banned);
-});
-
-app.get('/api/admin/throttled-devices', (req, res) => {
-  const throttled = Array.from(throttledDevices.entries()).map(([deviceId, endTime]) => ({
-    deviceId,
-    throttledAt: new Date(Date.now() - (THROTTLE_DURATION - (endTime - Date.now()))).toISOString(),
-    endsAt: new Date(endTime).toISOString(),
-    remainingTime: Math.max(0, endTime - Date.now())
-  }));
-  res.json(throttled);
-});
-
-app.post('/api/admin/unban-device', (req, res) => {
-  const { deviceId } = req.body;
-  if (bannedDevices.has(deviceId)) {
+// Ban kaldırma
+app.post('/api/admin/unban', authenticateAdmin, (req, res) => {
+    const { deviceId } = req.body;
+    
+    if (!deviceId) {
+        return res.status(400).json({ error: 'Device ID gerekli' });
+    }
+    
     bannedDevices.delete(deviceId);
-    io.emit('stats', getStats());
-    res.json({ success: true, message: 'Cihaz banı kaldırıldı' });
-  } else {
-    res.status(404).json({ success: false, message: 'Cihaz bulunamadı' });
-  }
+    bannedList.delete(deviceId);
+    
+    res.json({ success: true, message: 'Ban kaldırıldı' });
 });
 
-app.post('/api/admin/unthrottle-device', (req, res) => {
-  const { deviceId } = req.body;
-  if (throttledDevices.has(deviceId)) {
-    throttledDevices.delete(deviceId);
-    messageHistory.delete(deviceId);
-    io.emit('stats', getStats());
-    res.json({ success: true, message: 'Cihaz susturması kaldırıldı' });
-  } else {
-    res.status(404).json({ success: false, message: 'Cihaz bulunamadı' });
-  }
+// Tüm banları temizle
+app.post('/api/admin/clear-bans', authenticateAdmin, (req, res) => {
+    bannedDevices.clear();
+    bannedList.clear();
+    res.json({ success: true, message: 'Tüm banlar temizlendi' });
 });
 
-app.post('/api/admin/clear-bans', (req, res) => {
-  bannedDevices.clear();
-  io.emit('stats', getStats());
-  res.json({ success: true, message: 'Tüm banlar kaldırıldı' });
-});
-
-app.get('/api/admin/spammers', (req, res) => {
-  const spammers = Array.from(spammerTracking.entries()).map(([deviceId, records]) => ({
-    deviceId,
-    spamCount: records.length,
-    records
-  }));
-  res.json(spammers);
-});
-
-app.get('/api/admin/chat-history', (req, res) => {
-  res.json(chatHistory);
-});
-
+// ========== SUNUCUYU BAŞLAT ==========
+const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`Sunucu http://localhost:${PORT} adresinde çalışıyor`);
-  console.log(`Admin paneli: http://localhost:${PORT}/admin`);
+    console.log(`🚀 Server ${PORT} portunda çalışıyor`);
+    console.log(`🔒 Admin şifresi: ${ADMIN_PASSWORD === 'admin123' ? '⚠️ VARSAYILAN (admin123) - DEĞİŞTİR!' : '✅ Güvenli'}`);
 });
