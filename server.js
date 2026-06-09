@@ -6,11 +6,17 @@ require('dotenv').config();
 
 const app = express();
 const server = http.createServer(app);
+
+// RENDER İÇİN ÖNEMLİ: CORS ve WebSocket ayarları
 const io = socketIo(server, {
     cors: {
         origin: "*",
-        methods: ["GET", "POST"]
-    }
+        methods: ["GET", "POST"],
+        credentials: true
+    },
+    // Render için önemli ayarlar
+    transports: ['websocket', 'polling'],
+    allowEIO3: true
 });
 
 // Middleware
@@ -18,18 +24,15 @@ app.use(express.json());
 app.use(express.static('public'));
 
 // ========== VERİ YAPILARI ==========
-const bannedDevices = new Map();     // deviceId -> ban detayları
-const bannedList = new Set();        // sadece deviceId'ler
-const activeUsers = new Map();       // socketId -> user info
+const bannedDevices = new Map();
+const bannedList = new Set();
+const activeUsers = new Map();
 
-// ========== SOCKET.IO MIDDLEWARE (BAN KONTROLÜ) ==========
+// ========== SOCKET.IO MIDDLEWARE ==========
 io.use((socket, next) => {
     const deviceId = socket.handshake.auth.deviceId;
     
-    console.log(`🔍 Bağlantı kontrolü: ${deviceId}`);
-    
     if (bannedDevices.has(deviceId) || bannedList.has(deviceId)) {
-        console.log(`❌ Banlı cihaz engellendi: ${deviceId}`);
         const error = new Error("Bu cihaz banlanmış!");
         error.data = { reason: "banned" };
         return next(error);
@@ -44,39 +47,32 @@ io.on('connection', (socket) => {
     
     console.log(`✅ Kullanıcı bağlandı: ${username} (${deviceId})`);
     
-    // Çift ban kontrolü
     if (bannedDevices.has(deviceId) || bannedList.has(deviceId)) {
         socket.emit('banned', { message: 'Bu cihaz banlı!' });
         socket.disconnect();
         return;
     }
     
-    // Kullanıcıyı aktif listeye ekle
     activeUsers.set(socket.id, {
         username: username,
         deviceId: deviceId,
         joinedAt: new Date().toISOString()
     });
     
-    // Bağlantı bilgisini gönder
     socket.emit('connected', { 
         deviceId: deviceId,
         message: 'Sohbete hoş geldiniz!'
     });
     
-    // Tüm kullanıcılara güncel liste gönder
     const userList = Array.from(activeUsers.values());
     io.emit('user_list', userList);
     io.emit('system_message', { text: `✨ ${username} sohbete katıldı!`, type: 'info' });
     
-    // ===== MESAJ GÖNDERME EVENT'İ =====
+    // ===== MESAJ GÖNDERME =====
     socket.on('chat_message', (data) => {
         const deviceId = socket.handshake.auth.deviceId;
         const username = socket.handshake.auth.username;
         
-        console.log(`💬 Mesaj alındı: ${username}: ${data.message}`);
-        
-        // Boş mesaj kontrolü
         if (!data.message || data.message.trim() === '') {
             socket.emit('error', { message: 'Boş mesaj gönderemezsiniz!' });
             return;
@@ -85,10 +81,7 @@ io.on('connection', (socket) => {
         // Link engelleme
         const linkPattern = /(https?:\/\/|www\.|ftp:\/\/)/i;
         if (linkPattern.test(data.message)) {
-            bannedDevices.set(deviceId, { 
-                reason: 'Link paylaşımı', 
-                timestamp: Date.now() 
-            });
+            bannedDevices.set(deviceId, { reason: 'Link paylaşımı', timestamp: Date.now() });
             bannedList.add(deviceId);
             socket.emit('banned', { message: 'Link paylaştığınız için banlandınız!' });
             socket.disconnect();
@@ -96,7 +89,6 @@ io.on('connection', (socket) => {
             return;
         }
         
-        // Normal mesajı herkese gönder
         io.emit('chat_message', {
             username: username,
             message: data.message,
@@ -105,14 +97,10 @@ io.on('connection', (socket) => {
         });
     });
     
-    // ===== DEVREDEN ÇIKMA =====
     socket.on('disconnect', () => {
         const user = activeUsers.get(socket.id);
         if (user) {
-            console.log(`❌ Kullanıcı ayrıldı: ${user.username} (${user.deviceId})`);
             activeUsers.delete(socket.id);
-            
-            // Güncel kullanıcı listesini gönder
             const userList = Array.from(activeUsers.values());
             io.emit('user_list', userList);
             io.emit('system_message', { text: `👋 ${user.username} sohbetten ayrıldı.`, type: 'info' });
@@ -136,14 +124,11 @@ function authenticateAdmin(req, res, next) {
 }
 
 // ========== API ROUTES ==========
-
-// Aktif kullanıcıları listele
 app.get('/api/users', authenticateAdmin, (req, res) => {
     const users = Array.from(activeUsers.values());
     res.json(users);
 });
 
-// Banlı kullanıcıları listele
 app.get('/api/banned', authenticateAdmin, (req, res) => {
     const banned = Array.from(bannedDevices.entries()).map(([deviceId, data]) => ({
         deviceId: deviceId,
@@ -153,7 +138,6 @@ app.get('/api/banned', authenticateAdmin, (req, res) => {
     res.json(banned);
 });
 
-// Kullanıcı banlama
 app.post('/api/admin/ban', authenticateAdmin, (req, res) => {
     const { deviceId, reason } = req.body;
     
@@ -167,7 +151,6 @@ app.post('/api/admin/ban', authenticateAdmin, (req, res) => {
     });
     bannedList.add(deviceId);
     
-    // Kullanıcının bağlantısını kes
     for (let [socketId, socket] of io.sockets.sockets) {
         if (socket.handshake.auth.deviceId === deviceId) {
             socket.emit('banned', { message: `Admin tarafından banlandınız: ${reason || 'Kural ihlali'}` });
@@ -178,7 +161,6 @@ app.post('/api/admin/ban', authenticateAdmin, (req, res) => {
     res.json({ success: true, message: 'Cihaz banlandı' });
 });
 
-// Ban kaldırma
 app.post('/api/admin/unban', authenticateAdmin, (req, res) => {
     const { deviceId } = req.body;
     
@@ -192,18 +174,25 @@ app.post('/api/admin/unban', authenticateAdmin, (req, res) => {
     res.json({ success: true, message: 'Ban kaldırıldı' });
 });
 
-// Tüm banları temizle
 app.post('/api/admin/clear-bans', authenticateAdmin, (req, res) => {
     bannedDevices.clear();
     bannedList.clear();
     res.json({ success: true, message: 'Tüm banlar temizlendi' });
 });
 
+// Ana sayfa
+app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+app.get('/admin', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'admin.html'));
+});
+
 // ========== SUNUCUYU BAŞLAT ==========
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
+server.listen(PORT, '0.0.0.0', () => {
     console.log(`\n🚀 Server ${PORT} portunda çalışıyor`);
-    console.log(`🔗 Chat: http://localhost:${PORT}`);
-    console.log(`🔒 Admin: http://localhost:${PORT}/admin`);
-    console.log(`🔐 Admin şifresi: ${ADMIN_PASSWORD}\n`);
+    console.log(`🔗 Chat: https://your-app.onrender.com`);
+    console.log(`🔒 Admin: https://your-app.onrender.com/admin`);
 });
