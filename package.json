@@ -1,7 +1,7 @@
 {
   "name": "vamonos-chat",
   "version": "2.0.0",
-  "description": "Basit, anonim ve güvenli bir sohbet uygulaması",
+  "description": "Anonymous chat application with device ID ban system and spam protection",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -9,16 +9,23 @@
   },
   "keywords": [
     "chat",
-    "anonymous",
-    "real-time"
+    "socketio",
+    "realtime",
+    "anonymous-chat",
+    "ban-system",
+    "spam-protection"
   ],
-  "author": "",
+  "author": "mustafa-rxf",
   "license": "MIT",
   "dependencies": {
     "express": "^4.18.2",
-    "socket.io": "^4.5.4"
+    "socket.io": "^4.6.1",
+    "dotenv": "^16.0.3"
   },
   "devDependencies": {
-    "nodemon": "^2.0.20"
+    "nodemon": "^2.0.22"
+  },
+  "engines": {
+    "node": ">=14.0.0"
   }
 }
