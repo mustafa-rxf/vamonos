@@ -1,6 +1,10 @@
 console.log('🟢 Client.js yükleniyor...');
 
-// Device ID oluştur veya al
+// RENDER İÇİN: Doğru socket URL'sini bul
+const socketUrl = window.location.origin;
+console.log('🌐 Socket URL:', socketUrl);
+
+// Device ID
 let deviceId = localStorage.getItem('deviceId');
 if (!deviceId) {
     deviceId = 'dev_' + Math.random().toString(36).substr(2, 16) + '_' + Date.now();
@@ -8,8 +12,8 @@ if (!deviceId) {
 }
 console.log('🆔 Device ID:', deviceId);
 
-// Rastgele kullanıcı adı oluştur
-const adjectives = ['Hızlı', 'Cesur', 'Kısa', 'Neşeli', 'Sakin', 'Cesur', 'Zeki', 'Mutlu', 'Akıllı'];
+// Kullanıcı adı
+const adjectives = ['Hızlı', 'Uzun', 'Kısa', 'Neşeli', 'Sakin', 'Cesur', 'Zeki', 'Mutlu', 'Akıllı'];
 const nouns = ['Kedi', 'Köpek', 'Kuş', 'Balık', 'Aslan', 'Kaplan', 'Fil', 'Kurt', 'Tavşan'];
 const randomName = adjectives[Math.floor(Math.random() * adjectives.length)] + 
                    nouns[Math.floor(Math.random() * nouns.length)] + 
@@ -19,12 +23,16 @@ let currentUsername = localStorage.getItem('username') || randomName;
 localStorage.setItem('username', currentUsername);
 console.log('👤 Kullanıcı adı:', currentUsername);
 
-// Socket bağlantısı
-const socket = io({
+// RENDER İÇİN: Socket.IO bağlantısı (tüm transportlar denenecek)
+const socket = io(socketUrl, {
     auth: {
         deviceId: deviceId,
         username: currentUsername
-    }
+    },
+    transports: ['websocket', 'polling'],
+    reconnection: true,
+    reconnectionAttempts: 5,
+    reconnectionDelay: 1000
 });
 
 // DOM elementleri
@@ -36,29 +44,35 @@ const statusSpan = document.getElementById('status');
 
 // Bağlantı durumu
 socket.on('connect', () => {
-    console.log('✅ Socket bağlandı!');
+    console.log('✅ Socket bağlandı! Socket ID:', socket.id);
     if (statusSpan) {
         statusSpan.textContent = '🟢 Bağlı';
         statusSpan.style.color = 'green';
+    }
+    addSystemMessage('✅ Sohbete bağlandınız!');
+});
+
+socket.on('disconnect', () => {
+    console.log('❌ Socket bağlantısı kesildi');
+    if (statusSpan) {
+        statusSpan.textContent = '🔴 Bağlantı kesildi';
+        statusSpan.style.color = 'red';
+    }
+});
+
+socket.on('connect_error', (error) => {
+    console.error('❌ Bağlantı hatası:', error);
+    if (statusSpan) {
+        statusSpan.textContent = '🔴 Bağlanıyor...';
+        statusSpan.style.color = 'orange';
     }
 });
 
 socket.on('connected', (data) => {
     console.log('📡 Bağlantı onayı:', data);
     addSystemMessage(data.message || 'Sohbete hoş geldiniz!');
-    addSystemMessage(`🆔 Cihaz ID: ${data.deviceId.substring(0, 15)}...`);
 });
 
-// Bağlantı hatası
-socket.on('connect_error', (error) => {
-    console.error('❌ Bağlantı hatası:', error);
-    if (statusSpan) {
-        statusSpan.textContent = '🔴 Bağlantı hatası';
-        statusSpan.style.color = 'red';
-    }
-});
-
-// Ban mesajı
 socket.on('banned', (data) => {
     console.log('🚫 Banlandı:', data);
     alert('❌ ' + data.message);
@@ -66,22 +80,20 @@ socket.on('banned', (data) => {
         <div style="text-align:center; padding:50px; font-family:Arial;">
             <h1>🚫 BANLANDINIZ</h1>
             <p>${data.message}</p>
+            <hr>
             <p style="color:red;">Bu cihaz sohbetten uzaklaştırıldı.</p>
             <button onclick="location.reload()">Tekrar Dene</button>
         </div>
     `;
-    socket.disconnect();
 });
 
-// Hata mesajı
 socket.on('error', (data) => {
     console.log('⚠️ Hata:', data);
     addSystemMessage('⚠️ ' + data.message);
 });
 
-// Normal mesaj
 socket.on('chat_message', (data) => {
-    console.log('💬 Mesaj geldi:', data);
+    console.log('💬 Mesaj geldi:', data.username, ':', data.message);
     const messageDiv = document.createElement('div');
     messageDiv.className = 'message';
     messageDiv.innerHTML = `
@@ -93,43 +105,40 @@ socket.on('chat_message', (data) => {
     messagesDiv.scrollTop = messagesDiv.scrollHeight;
 });
 
-// Sistem mesajı
 socket.on('system_message', (data) => {
-    console.log('📢 Sistem:', data);
+    console.log('📢 Sistem:', data.text);
     addSystemMessage(data.text);
 });
 
-// Kullanıcı listesi güncelleme
 socket.on('user_list', (users) => {
-    console.log('👥 Kullanıcı listesi:', users.length, 'aktif kullanıcı');
+    console.log('👥 Aktif kullanıcılar:', users.length);
     if (userCountSpan) {
         userCountSpan.textContent = users.length;
     }
-    
-    // Kullanıcı listesini göster (opsiyonel)
-    if (document.getElementById('userList')) {
-        const userListDiv = document.getElementById('userList');
-        userListDiv.innerHTML = users.map(u => `<div>${escapeHtml(u.username)}</div>`).join('');
-    }
 });
 
-// Mesaj gönderme fonksiyonu
+// Mesaj gönderme
 function sendMessage() {
     const message = messageInput.value.trim();
     console.log('📤 Mesaj gönderiliyor:', message);
     
     if (message === '') {
-        console.log('⚠️ Boş mesaj gönderilemez');
+        console.log('⚠️ Boş mesaj');
+        return;
+    }
+    
+    if (!socket.connected) {
+        console.log('❌ Socket bağlı değil!');
+        addSystemMessage('❌ Bağlantı yok, mesaj gönderilemiyor!');
         return;
     }
     
     socket.emit('chat_message', { message: message });
-    console.log('✅ Mesaj gönderildi');
+    console.log('✅ Mesaj emit edildi');
     messageInput.value = '';
     messageInput.focus();
 }
 
-// Sistem mesajı ekleme
 function addSystemMessage(text) {
     const sysDiv = document.createElement('div');
     sysDiv.className = 'system-message';
@@ -138,7 +147,6 @@ function addSystemMessage(text) {
     messagesDiv.scrollTop = messagesDiv.scrollHeight;
 }
 
-// HTML escape
 function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
@@ -148,22 +156,26 @@ function escapeHtml(text) {
 // Event listenerlar
 if (sendButton) {
     sendButton.addEventListener('click', sendMessage);
-    console.log('✅ Send button listener eklendi');
+    console.log('✅ Send button hazır');
 } else {
-    console.error('❌ Send button bulunamadı!');
+    console.error('❌ Send button bulunamadı! ID: sendButton');
 }
 
 if (messageInput) {
     messageInput.addEventListener('keypress', (e) => {
         if (e.key === 'Enter') {
-            console.log('⏎ Enter tuşuna basıldı');
             sendMessage();
         }
     });
-    console.log('✅ Message input listener eklendi');
+    console.log('✅ Input hazır');
 } else {
-    console.error('❌ Message input bulunamadı!');
+    console.error('❌ Message input bulunamadı! ID: messageInput');
 }
 
 // Sayfa yüklendiğinde
-console.log('🟢 Client.js hazır, Socket.IO versiyonu:', io.version);
+window.addEventListener('load', () => {
+    console.log('📄 Sayfa yüklendi');
+    console.log('🔌 Socket durumu:', socket.connected ? 'Bağlı' : 'Bağlı değil');
+});
+
+console.log('🟢 Client.js hazır');
