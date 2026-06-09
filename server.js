@@ -14,7 +14,7 @@ const io = socketIo(server, {
 });
 
 app.use(cors());
-app.use(express.static('public'));
+app.use(express.static(path.join(__dirname, 'public')));
 
 // Random name generator
 const adjectives = ['Happy', 'Cool', 'Smart', 'Quick', 'Bright', 'Swift', 'Clever', 'Bold', 'Wild', 'Calm'];
@@ -32,6 +32,11 @@ const linkRegex = /(https?:\/\/|www\.|ftp:\/\/)/i;
 
 // Track IPs that shared links
 const bannedIPs = new Set();
+
+// Root route
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
 
 // Socket.io events
 io.on('connection', (socket) => {
@@ -95,6 +100,6 @@ io.on('connection', (socket) => {
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`🚀 Chat server running on http://localhost:${PORT}`);
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`🚀 Chat server running on port ${PORT}`);
 });
